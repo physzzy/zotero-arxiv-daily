@@ -2,8 +2,11 @@ name: Keepalive
 
 on:
   schedule:
-    - cron: "0 0 * * 1"  # 每周一 00:00（UTC）跑一次
+    - cron: "0 0 * * 1"   # 每周一 00:00 UTC（日本 09:00）
   workflow_dispatch:
+
+permissions:
+  contents: write  # 关键：允许提交代码
 
 jobs:
   keepalive:
