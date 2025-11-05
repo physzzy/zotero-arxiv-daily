@@ -1,4 +1,4 @@
-name: Keepalive
+name: Keepalive via PR
 
 on:
   schedule:
@@ -6,13 +6,25 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # 关键：允许提交代码
+  contents: write
+  pull-requests: write
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
     steps:
-      - name: Keep alive
-        uses: gautamkrishnar/keepalive-workflow@v2
+      - uses: actions/checkout@v4
+
+      - name: Touch keepalive file
+        run: |
+          mkdir -p .github
+          date -u +"%Y-%m-%dT%H:%M:%SZ" >> .github/KEEPALIVE.log
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
         with:
-          commit_message: "chore: keepalive"
+          commit-message: "chore: keepalive"
+          title: "chore: keepalive"
+          body: "Automated keepalive PR"
+          branch: keepalive-bot
+          delete-branch: true
