@@ -1,0 +1,15 @@
+name: Keepalive
+
+on:
+  schedule:
+    - cron: "0 0 * * 1"  # 每周一 00:00（UTC）跑一次
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep alive
+        uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          commit_message: "chore: keepalive"
