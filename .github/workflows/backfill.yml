@@ -1,0 +1,103 @@
+name: Backfill missed arXiv emails
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: First missing announcement day (Asia/Singapore, YYYY-MM-DD)
+        required: true
+        default: '2026-10-15'
+        type: string
+      end_date:
+        description: Last missing announcement day (YYYY-MM-DD)
+        required: true
+        default: '2026-10-26'
+        type: string
+      format:
+        description: full preserves AI TLDRs; abstract sends the original abstracts
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - abstract
+      dry_run:
+        description: Check historical retrieval without sending email
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arxiv-email-backfill
+  cancel-in-progress: false
+
+jobs:
+  dates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      days: ${{ steps.dates.outputs.days }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: dates
+        name: Validate the date range
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          days=$(python3 backfill_email.py --dates "$START_DATE" "$END_DATE")
+          echo "days=$days" >> "$GITHUB_OUTPUT"
+
+  backfill:
+    needs: dates
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        day: ${{ fromJSON(needs.dates.outputs.days) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: '0.5.4'
+      - name: Retrieve, rank, and backfill one mailing
+        env:
+          BACKFILL_DAY: ${{ matrix.day }}
+          BACKFILL_FORMAT: ${{ inputs.format }}
+          BACKFILL_DRY_RUN: ${{ inputs.dry_run }}
+          REPORT_DIR: ${{ runner.temp }}/arxiv_backfill_reports
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+          ZOTERO_IGNORE: ${{ vars.ZOTERO_IGNORE }}
+          ARXIV_QUERY: ${{ secrets.ARXIV_QUERY }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SENDER: ${{ secrets.SENDER }}
+          RECEIVER: ${{ secrets.RECEIVER }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          MAX_PAPER_NUM: ${{ secrets.MAX_PAPER_NUM }}
+          USE_LLM_API: ${{ secrets.USE_LLM_API }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          MODEL_NAME: ${{ secrets.MODEL_NAME }}
+          LANGUAGE: ${{ vars.LANGUAGE }}
+        run: |
+          args=(--day "$BACKFILL_DAY" --format "$BACKFILL_FORMAT" --report-dir "$REPORT_DIR")
+          if [ "$BACKFILL_DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          uv run python backfill_email.py "${args[@]}"
+      - name: Keep delivery receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-${{ matrix.day }}
+          path: ${{ runner.temp }}/arxiv_backfill_reports/*.json
+          if-no-files-found: ignore
+          retention-days: 7
