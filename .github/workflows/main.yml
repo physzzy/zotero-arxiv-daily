@@ -2,7 +2,7 @@ name: Send emails daily
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '17 5 * * *'  # 13:17 Beijing time; fetch after the arXiv RSS update
 
 jobs:
   calculate-and-send:
@@ -37,5 +37,6 @@ jobs:
           OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
           MODEL_NAME: ${{ secrets.MODEL_NAME }}
           LANGUAGE: ${{ vars.LANGUAGE }}
+          EMAIL_NOT_BEFORE_UTC: '07:00'  # 15:00 Beijing time
         run: |
           uv run main.py
