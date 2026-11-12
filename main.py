@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from tempfile import mkstemp
 
 import arxiv
@@ -58,6 +59,20 @@ def filter_corpus(corpus: list[dict], pattern: str) -> list[dict]:
 
 def parse_bool_env(value: str) -> bool:
     return value.lower() in ["true", "1", "yes", "y", "on"]
+
+
+def wait_until_delivery_time():
+    """Delay scheduled mail until the configured UTC time; manual runs send immediately."""
+    not_before = os.environ.get("EMAIL_NOT_BEFORE_UTC")
+    if os.environ.get("GITHUB_EVENT_NAME") != "schedule" or not not_before:
+        return
+    hour, minute = map(int, not_before.split(":"))
+    now = datetime.now(timezone.utc)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    delay = (target - now).total_seconds()
+    if delay > 0:
+        logger.info(f"Email prepared; waiting {delay:.0f}s until {target.isoformat()} before sending.")
+        time.sleep(delay)
 
 
 def fetch_rss_with_retry(query: str, max_attempts: int = 5, base_wait: int = 5):
@@ -343,6 +358,7 @@ if __name__ == "__main__":
             set_global_llm(lang=args.language)
 
     html = render_email(papers)
+    wait_until_delivery_time()
     logger.info("Sending email...")
     send_email(
         args.sender,
