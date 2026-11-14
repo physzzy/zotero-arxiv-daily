@@ -24,8 +24,9 @@ on:
         description: 'Optional Beijing date, YYYY-MM-DD; historical dates are rejected'
         type: string
         required: false
-  schedule:
-    - cron: '17 5 * * *' # 13:17 Beijing; GitHub may start scheduled runs late
+
+# Mac Studio dispatches afternoon mode at 13:17 Beijing each day.
+# Ready digests wait until 15:00 Beijing before SMTP delivery.
 
 permissions:
   contents: read
