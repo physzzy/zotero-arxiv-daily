@@ -82,6 +82,7 @@ def check_runtime(executor, client, corpus, delivery_date):
     from zotero_arxiv_daily.protocol import Paper
     from zotero_arxiv_daily.construct_email import render_email
 
+    prior_smtp_accepted = already_sent(delivery_date)
     raw = executor.retrievers["arxiv"]._retrieve_raw_papers()
     paper = Paper(source="arxiv", title="Local model compatibility check",
                   authors=["Test Author"], abstract="We study electron transport in a two-dimensional tight-binding model and find an edge-localized conducting mode.",
@@ -96,7 +97,8 @@ def check_runtime(executor, client, corpus, delivery_date):
         raise RuntimeError("HTML compatibility check failed")
     return receipt("dry_run_ok", delivery_date=delivery_date, count=1,
                    zotero_count=len(corpus), rss_paper_count=len(raw), local_ai_calls=client.calls,
-                   upstream_revision=UPSTREAM_REVISION, smtp_attempted=False)
+                   upstream_revision=UPSTREAM_REVISION, smtp_attempted=False,
+                   prior_smtp_accepted=prior_smtp_accepted)
 
 
 def run(check=False):
