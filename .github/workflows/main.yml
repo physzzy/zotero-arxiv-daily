@@ -1,25 +1,59 @@
 name: Send emails daily
+
 on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        default: check
+      delivery_date:
+        type: string
+        default: ''
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'check never sends mail; afternoon holds delivery until 15:00 Beijing'
+        type: choice
+        required: true
+        default: check
+        options:
+          - check
+          - afternoon
+          - send_now
+      delivery_date:
+        description: 'Optional Beijing date, YYYY-MM-DD; historical dates are rejected'
+        type: string
+        required: false
   schedule:
-    - cron: '17 5 * * *'  # 13:17 Beijing time; fetch after the arXiv RSS update
+    - cron: '17 5 * * *' # 13:17 Beijing; GitHub may start scheduled runs late
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daily-arxiv-mail
+  cancel-in-progress: false
 
 jobs:
   calculate-and-send:
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout this repository
+        uses: actions/checkout@v6
         with:
-          repository: ${{ vars.REPOSITORY }}
-          ref: ${{ vars.REF }}
+          persist-credentials: false
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
         with:
-          version: '0.5.4'
+          version: '0.11.7'
+          python-version: '3.13'
+          enable-cache: true
 
-      - name: Run script
+      - name: Generate digest or validate without sending
+        id: digest
         env:
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
@@ -32,11 +66,24 @@ jobs:
           RECEIVER: ${{ secrets.RECEIVER }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           MAX_PAPER_NUM: ${{ secrets.MAX_PAPER_NUM }}
-          USE_LLM_API: ${{ secrets.USE_LLM_API }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
-          MODEL_NAME: ${{ secrets.MODEL_NAME }}
           LANGUAGE: ${{ vars.LANGUAGE }}
-          EMAIL_NOT_BEFORE_UTC: '07:00'  # 15:00 Beijing time
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_MODE: ${{ github.event_name == 'schedule' && 'afternoon' || inputs.mode }}
+          DELIVERY_DATE: ${{ inputs.delivery_date }}
+          DELIVERY_RECEIPT: '_maintenance/delivery.json'
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
         run: |
-          uv run main.py
+          if [ "$DELIVERY_MODE" = "check" ]; then
+            uv run --locked main.py --check
+          else
+            uv run --locked main.py
+          fi
+
+      - name: Preserve delivery receipt
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: arxiv-delivery-${{ steps.digest.outputs.date || 'failed' }}-${{ github.run_id }}
+          path: _maintenance/delivery.json
+          if-no-files-found: warn
+          retention-days: 30
