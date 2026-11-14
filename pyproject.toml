@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "zotero-arxiv-daily @ https://github.com/TideDra/zotero-arxiv-daily/archive/35c23ec44617b7595b30ac8e5bf4326c6cfd2336.zip",
     "llama-cpp-python>=0.3.2",
+    "torch",
 ]
 
 [tool.uv.sources]
