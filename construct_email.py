@@ -1,163 +1,132 @@
-from paper import ArxivPaper
-import math
-from tqdm import tqdm
-from email.header import Header
-from email.mime.text import MIMEText
-from email.utils import parseaddr, formataddr
+"""Timed TLS delivery and receipts; SMTP acceptance is recorded before QUIT."""
+
+import json
+import io
+import os
+from pathlib import Path
 import smtplib
-import datetime
-from loguru import logger
+import ssl
+import time
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime, make_msgid
+from zoneinfo import ZoneInfo
+import urllib.request
+import urllib.parse
+import zipfile
 
-framework = """
-<!DOCTYPE HTML>
-<html>
-<head>
-  <style>
-    .star-wrapper {
-      font-size: 1.3em; /* 调整星星大小 */
-      line-height: 1; /* 确保垂直对齐 */
-      display: inline-flex;
-      align-items: center; /* 保持对齐 */
-    }
-    .half-star {
-      display: inline-block;
-      width: 0.5em; /* 半颗星的宽度 */
-      overflow: hidden;
-      white-space: nowrap;
-      vertical-align: middle;
-    }
-    .full-star {
-      vertical-align: middle;
-    }
-  </style>
-</head>
-<body>
-
-<div>
-    __CONTENT__
-</div>
-
-<br><br>
-<div>
-To unsubscribe, remove your email in your Github Action setting.
-</div>
-
-</body>
-</html>
-"""
-
-def get_empty_html():
-  block_template = """
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 16px; background-color: #f9f9f9;">
-  <tr>
-    <td style="font-size: 20px; font-weight: bold; color: #333;">
-        No Papers Today. Take a Rest!
-    </td>
-  </tr>
-  """
-  return block_template
-
-def get_block_html(title:str, authors:str, rate:str,arxiv_id:str, abstract:str, pdf_url:str, code_url:str=None, affiliations:str=None):
-    code = f'<a href="{code_url}" style="display: inline-block; text-decoration: none; font-size: 14px; font-weight: bold; color: #fff; background-color: #5bc0de; padding: 8px 16px; border-radius: 4px; margin-left: 8px;">Code</a>' if code_url else ''
-    block_template = """
-    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 16px; background-color: #f9f9f9;">
-    <tr>
-        <td style="font-size: 20px; font-weight: bold; color: #333;">
-            {title}
-        </td>
-    </tr>
-    <tr>
-        <td style="font-size: 14px; color: #666; padding: 8px 0;">
-            {authors}
-            <br>
-            <i>{affiliations}</i>
-        </td>
-    </tr>
-    <tr>
-        <td style="font-size: 14px; color: #333; padding: 8px 0;">
-            <strong>Relevance:</strong> {rate}
-        </td>
-    </tr>
-    <tr>
-        <td style="font-size: 14px; color: #333; padding: 8px 0;">
-            <strong>arXiv ID:</strong> {arxiv_id}
-        </td>
-    </tr>
-    <tr>
-        <td style="font-size: 14px; color: #333; padding: 8px 0;">
-            <strong>TLDR:</strong> {abstract}
-        </td>
-    </tr>
-
-    <tr>
-        <td style="padding: 8px 0;">
-            <a href="{pdf_url}" style="display: inline-block; text-decoration: none; font-size: 14px; font-weight: bold; color: #fff; background-color: #d9534f; padding: 8px 16px; border-radius: 4px;">PDF</a>
-            {code}
-        </td>
-    </tr>
-</table>
-"""
-    return block_template.format(title=title, authors=authors,rate=rate,arxiv_id=arxiv_id, abstract=abstract, pdf_url=pdf_url, code=code, affiliations=affiliations)
-
-def get_stars(score:float):
-    full_star = '<span class="full-star">⭐</span>'
-    half_star = '<span class="half-star">⭐</span>'
-    low = 6
-    high = 8
-    if score <= low:
-        return ''
-    elif score >= high:
-        return full_star * 5
-    else:
-        interval = (high-low) / 10
-        star_num = math.ceil((score-low) / interval)
-        full_star_num = int(star_num/2)
-        half_star_num = star_num - full_star_num * 2
-        return '<div class="star-wrapper">'+full_star * full_star_num + half_star * half_star_num + '</div>'
+BEIJING = ZoneInfo("Asia/Shanghai")
 
 
-def render_email(papers:list[ArxivPaper]):
-    parts = []
-    if len(papers) == 0 :
-        return framework.replace('__CONTENT__', get_empty_html())
-    
-    for p in tqdm(papers,desc='Rendering Email'):
-        rate = get_stars(p.score)
-        authors = [a.name for a in p.authors[:5]]
-        authors = ', '.join(authors)
-        if len(p.authors) > 5:
-            authors += ', ...'
-        if p.affiliations is not None:
-            affiliations = p.affiliations[:5]
-            affiliations = ', '.join(affiliations)
-            if len(p.affiliations) > 5:
-                affiliations += ', ...'
-        else:
-            affiliations = 'Unknown Affiliation'
-        parts.append(get_block_html(p.title, authors,rate,p.arxiv_id ,p.tldr, p.pdf_url, p.code_url, affiliations))
+def already_sent(delivery_date):
+    """Read earlier receipts under the existing Actions token; fail closed."""
+    token = os.environ.get("GITHUB_TOKEN")
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repository:
+        return False
 
-    content = '<br>' + '</br><br>'.join(parts) + '</br>'
-    return framework.replace('__CONTENT__', content)
+    class SafeRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if urllib.parse.urlparse(newurl).scheme != "https":
+                raise RuntimeError("Unsafe artifact redirect")
+            result = super().redirect_request(req, fp, code, msg, headers, newurl)
+            result.remove_header("Authorization")
+            return result
 
-def send_email(sender:str, receiver:str, password:str,smtp_server:str,smtp_port:int, html:str,):
-    def _format_addr(s):
-        name, addr = parseaddr(s)
-        return formataddr((Header(name, 'utf-8').encode(), addr))
+    opener = urllib.request.build_opener(SafeRedirect())
 
-    msg = MIMEText(html, 'html', 'utf-8')
-    msg['From'] = _format_addr('Github Action <%s>' % sender)
-    msg['To'] = _format_addr('You <%s>' % receiver)
-    today = datetime.datetime.now().strftime('%Y/%m/%d')
-    msg['Subject'] = Header(f'Daily arXiv {today}', 'utf-8').encode()
+    def read(url, limit):
+        if urllib.parse.urlparse(url).hostname != "api.github.com":
+            raise RuntimeError("Unexpected GitHub API destination")
+        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+        with opener.open(request, timeout=30) as response:
+            data = response.read(limit + 1)
+        if len(data) > limit:
+            raise RuntimeError("Artifact exceeds receipt size limit")
+        return data
 
+    prefix = f"arxiv-delivery-{delivery_date}-"
+    url = f"https://api.github.com/repos/{repository}/actions/artifacts?per_page=100"
+    for artifact in json.loads(read(url, 2_000_000))["artifacts"]:
+        if not artifact["name"].startswith(prefix) or artifact["expired"]:
+            continue
+        with zipfile.ZipFile(io.BytesIO(read(artifact["archive_download_url"], 1_000_000))) as archive:
+            info = archive.getinfo("delivery.json")
+            if info.file_size > 100_000:
+                raise RuntimeError("Invalid receipt size")
+            prior = json.loads(archive.read(info))
+        if prior.get("status") == "smtp_accepted" and prior.get("date") == delivery_date:
+            return True
+    return False
+
+
+def receipt(status, *, delivery_date, count=0, **details):
+    result = dict(status=status, date=delivery_date, paper_count=count,
+                  recorded_at=datetime.now(timezone.utc).isoformat(), **details)
+    path = Path(os.environ.get("DELIVERY_RECEIPT", "_maintenance/delivery.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    print("DELIVERY_RECEIPT " + json.dumps(result, ensure_ascii=False), flush=True)
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        with open(output, "a") as stream:
+            stream.write(f"status={status}\ndate={delivery_date}\n")
+    return result
+
+
+def wait_until_delivery_time(delivery_date, *, now=None, sleep=time.sleep):
+    timed = os.environ.get("GITHUB_EVENT_NAME") == "schedule" or os.environ.get("DELIVERY_MODE") == "afternoon"
+    if not timed:
+        return
+    now = now or datetime.now(timezone.utc)
+    target = datetime.fromisoformat(delivery_date).replace(hour=15, tzinfo=BEIJING)
+    delay = max(0, (target - now).total_seconds())
+    if delay:
+        print(f"Digest ready; waiting {delay:.0f}s until 15:00 Beijing", flush=True)
+        sleep(delay)
+
+
+def send_email(config, html, *, delivery_date, count, smtp_factory=None, ssl_factory=None):
+    wait_until_delivery_time(delivery_date)
+    message = EmailMessage()
+    message["From"] = config.email.sender
+    message["To"] = config.email.receiver
+    message["Subject"] = f"Daily arXiv {delivery_date.replace('-', '/')}"
+    message["Date"] = format_datetime(datetime.now(BEIJING))
+    message["Message-ID"] = make_msgid()
+    message.set_content("Your daily arXiv digest is included as HTML.")
+    message.add_alternative(html, subtype="html")
+    smtp_factory = smtp_factory or smtplib.SMTP
+    ssl_factory = ssl_factory or smtplib.SMTP_SSL
+    context = ssl.create_default_context()
+    server = None
+    accepted = False
     try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-    except Exception as e:
-        logger.warning(f"Failed to use TLS. {e}")
-        logger.warning(f"Try to use SSL.")
-        server = smtplib.SMTP_SSL(smtp_server, smtp_port)
-
-    server.login(sender, password)
-    server.sendmail(sender, [receiver], msg.as_string())
-    server.quit()
+        port = int(config.email.smtp_port)
+        if port == 465:
+            server = ssl_factory(config.email.smtp_server, port, timeout=60, context=context)
+        else:
+            server = smtp_factory(config.email.smtp_server, port, timeout=60)
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+        server.login(config.email.sender, config.email.sender_password)
+        refused = server.send_message(message, config.email.sender, [config.email.receiver])
+        if refused:
+            raise RuntimeError("SMTP refused the recipient")
+        accepted = True
+        # No resend after the server has acknowledged DATA, even if QUIT fails.
+        result = receipt("smtp_accepted", delivery_date=delivery_date, count=count,
+                         message_id=message["Message-ID"])
+        return result
+    finally:
+        if server is not None:
+            try:
+                server.quit()
+            except Exception:
+                try:
+                    server.close()
+                except Exception:
+                    pass
+                if accepted:
+                    print("SMTP accepted the message; connection cleanup failed", flush=True)
